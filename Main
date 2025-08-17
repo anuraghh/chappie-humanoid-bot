@@ -1,0 +1,212 @@
+import os
+import cv2
+import base64
+import time
+import pyttsx3
+import requests
+import numpy as np
+import threading
+import streamlit as st
+from scipy.io import wavfile
+from dotenv import load_dotenv
+from groq import Groq
+
+# Load environment variables
+load_dotenv()
+key = os.getenv("GROQ_API_KEY")
+eden = os.getenv("EDEN_API_KEY")
+eden_ai_key = f"Bearer {eden}"
+
+# Global event for stopping processes
+force_stop = threading.Event() vs
+
+def capture_and_analyze():
+    """Capture image from camera and analyze it based on text input prompt"""
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        return "Failed to open camera"
+
+    print("Camera opened successfully. Press SPACE to capture or ESC to cancel.")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Can't receive frame. Exiting...")
+            break
+
+        cv2.imshow('Press SPACE to capture, ESC to cancel', frame)
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == 32:  # SPACE key
+            _, buffer = cv2.imencode('.jpg', frame)
+            encoded_image = base64.b64encode(buffer).decode('utf-8')
+
+            cap.release()
+            cv2.destroyAllWindows()
+
+            prompt = get_text_input()
+            result = analyze_image_from_base64(encoded_image, prompt)
+            return result
+
+        elif key == 27:  # ESC key
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    return "Capture cancelled"
+
+def get_text_input(prompt="What would you like to know about the image?"):
+    """Get text prompt from user"""
+    return input(f"{prompt} ")
+
+def analyze_image_from_base64(encoded_image, prompt="What is in the image?"):
+    """Analyze an image using Groq API from base64 string with custom prompt"""
+    client = Groq(api_key=key)
+    completion = client.chat.completions.create(
+        model="llama-3.2-11b-vision-preview",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}}
+                ]
+            }
+        ],
+        temperature=1,
+        max_tokens=1024,
+        top_p=1,
+        stream=False,
+        stop=None,
+    )
+    return completion.choices[0].message.content
+
+def speak_text(text):
+    """Convert text to speech"""
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 150)
+    engine.setProperty('volume', 0.9)
+    engine.say(text)
+    engine.runAndWait()
+
+def continuous_camera_analysis():
+    """Run continuous analysis on camera feed with text prompts"""
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
+        return "Failed to open camera"
+
+    print("Camera opened for continuous analysis.")
+    print("Press 'a' to analyze, 'q' to quit.")
+
+    last_analysis_time = 0
+    cooldown = 5  
+    last_result = "No analysis yet"
+
+    while not force_stop.is_set():
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Can't receive frame. Exiting...")
+            break
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(frame, "Press 'a' to analyze, 'q' to quit", (10, 30), font, 0.7, (0, 255, 0), 2)
+
+        result_lines = last_result.split('\n')
+        y_pos = 70
+        for line in result_lines[:3]:
+            cv2.putText(frame, line[:50] + ('...' if len(line) > 50 else ''), (10, y_pos), font, 0.5, (255, 255, 255), 1)
+            y_pos += 30
+
+        cv2.imshow('Continuous Analysis', frame)
+
+        key = cv2.waitKey(1) & 0xFF
+
+        current_time = time.time()
+        if key == ord('a') and (current_time - last_analysis_time > cooldown):
+            print("Analyzing current frame...")
+            _, buffer = cv2.imencode('.jpg', frame)
+            encoded_image = base64.b64encode(buffer).decode('utf-8')
+
+            prompt = get_text_input()
+            last_result = analyze_image_from_base64(encoded_image, prompt)
+            print(last_result)
+            speak_text(last_result)
+
+            last_analysis_time = current_time
+        elif key == ord('a'):
+            remaining = cooldown - (current_time - last_analysis_time)
+            print(f"Please wait {remaining:.1f} seconds before next analysis.")
+
+        elif key == ord('q') or force_stop.is_set():
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    force_stop.clear()  
+    return "Continuous analysis ended"
+
+def text_input_prompt():
+    """Get prompt from text input for image generation"""
+    return get_text_input("Please enter your prompt for image generation:")
+
+def main():
+    st.title("Chappie")
+
+    option = st.sidebar.selectbox(
+        "Choose an option",
+        ("Analyze from Camera", "Continuous Camera Analysis", "Analyze Image from File", "Generate Image", "Exit")
+    )
+
+    if option == "Analyze from Camera":
+        st.write("Press the button below to capture an image from your camera and analyze it.")
+        if st.button("Capture and Analyze"):
+            result = capture_and_analyze()
+            st.write("Analysis Result:")
+            st.write(result)
+            speak_text(result)
+
+    elif option == "Continuous Camera Analysis":
+        st.write("Press the button below to start continuous camera analysis.")
+        if st.button("Start Continuous Analysis"):
+            force_stop.clear()
+            threading.Thread(target=continuous_camera_analysis, daemon=True).start()
+            st.write("Continuous analysis started. Click 'Force Stop' to stop.")
+
+    elif option == "Analyze Image from File":
+        st.write("Upload an image file to analyze.")
+        uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+        if uploaded_file is not None:
+            image_path = os.path.join("temp", uploaded_file.name)
+            with open(image_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            result = analyze_image(image_path)
+            st.write("Analysis Result:")
+            st.write(result)
+            speak_text(result)
+
+    elif option == "Generate Image":
+        st.write("Generate an image using a text prompt.")
+        prompt = text_input_prompt()
+
+        if st.button("Generate Image"):
+            st.write(f"Using prompt: {prompt}")
+            image_url = generate_image(prompt)
+            st.write(f"Generated image URL: {image_url}")
+            speak_text(f"Image generated successfully. You can view it at {image_url}")
+
+    elif option == "Exit":
+        st.write("Exiting the application.")
+        st.stop()
+
+    # ✅ Force Stop button is always visible in the sidebar
+    st.sidebar.markdown("---")  # Adds a separator
+    if st.sidebar.button("🛑 Force Stop", use_container_width=True):
+        force_stop.set()
+        st.write("Force stopping the process... Please wait.")
+
+if __name__ == "__main__":
+    main()
